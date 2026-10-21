@@ -1,0 +1,1371 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""RSS 学习管理系统 - 后端"""
+
+import http.server
+import json
+import os
+import re
+import subprocess
+import sys
+import threading
+import time
+import urllib.parse
+import datetime
+from email.utils import parsedate_to_datetime
+from pathlib import Path
+
+ROOT = Path(r"E:\2_Assets\E2_1 RSS")
+MASTER = ROOT / "_master"
+REPOS_JSON = MASTER / "repos.json"
+HOST = "127.0.0.1"
+PORT = 8765
+
+_lock = threading.Lock()
+_utf8 = "utf-8"
+
+_net_cache = {"ms": None, "time": 0}
+
+
+def read_json(path, default=None):
+    try:
+        return json.loads(path.read_text(encoding="utf-8-sig"))
+    except Exception:
+        if default is not None:
+            return default
+        raise
+
+
+def write_json(path, obj):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding=_utf8)
+
+
+def write_text(path, text):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding=_utf8)
+
+
+def run_ps(cmd, cwd=MASTER, timeout=300):
+    full = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", cmd]
+    try:
+        r = subprocess.run(full, cwd=str(cwd), capture_output=True,
+                           timeout=timeout, encoding="utf-8", errors="replace")
+        return r.returncode, r.stdout or "", r.stderr or ""
+    except subprocess.TimeoutExpired:
+        return -1, "", "timeout"
+
+
+def git_status(name):
+    p = ROOT / name
+    if not (p / ".git").exists():
+        return {"exists": False, "ahead": 0, "local": 0, "branch": ""}
+    try:
+        ahead = subprocess.run(
+            ["git", "-C", str(p), "rev-list", "--count", "@{u}..HEAD"],
+            capture_output=True, text=True, timeout=10).stdout.strip() or "0"
+        local = subprocess.run(
+            ["git", "-C", str(p), "status", "--porcelain"],
+            capture_output=True, text=True, timeout=10).stdout
+        branch = subprocess.run(
+            ["git", "-C", str(p), "branch", "--show-current"],
+            capture_output=True, text=True, timeout=10).stdout.strip()
+        return {"exists": True,
+                "ahead": int(ahead) if ahead.isdigit() else 0,
+                "local": len([l for l in local.splitlines() if l.strip()]),
+                "branch": branch}
+    except Exception as e:
+        return {"exists": True, "ahead": 0, "local": 0, "branch": "", "error": str(e)}
+
+
+def repo_info(name):
+    p = ROOT / name
+    info = {
+        "exists": p.exists() and (p / ".git").exists(),
+        "epub": {"total": 0, "progress": 0, "disabled": 0},
+        "csv":  {"total": 0, "progress": 0},
+        "tasks": [],
+    }
+    if not info["exists"]:
+        return info
+
+    cfg = read_json(REPOS_JSON, {})
+    repo_cfg = cfg.get("repos", {}).get(name, {})
+
+    if "tasks" in repo_cfg and repo_cfg["tasks"]:
+        for task in repo_cfg["tasks"]:
+            tid = task.get("id", "")
+            label = task.get("label", tid)
+            lang = task.get("lang", "")
+            cron_val = task.get("cron", "")
+            batch_size = task.get("batch_size", 0)
+
+            input_rel = task.get("input_file", "")
+            progress_rel = task.get("progress_file", "")
+
+            total = 0
+            progress = 0
+
+            if input_rel:
+                input_path = p / input_rel
+                if input_path.exists():
+                    try:
+                        lines = input_path.read_text(encoding="utf-8-sig").splitlines()
+                        total = max(0, len([l for l in lines if l.strip()]) - 1)
+                    except Exception:
+                        pass
+
+            if progress_rel:
+                prog_path = p / progress_rel
+                if prog_path.exists():
+                    try:
+                        progress = int(prog_path.read_text(encoding="ascii").strip() or 0)
+                    except Exception:
+                        pass
+
+            task_type = task.get("type", "llm")
+            info["tasks"].append({
+                "id": tid,
+                "label": label,
+                "lang": lang,
+                "type": task_type,
+                "cron": cron_val,
+                "batch_size": batch_size,
+                "total": total,
+                "progress": progress,
+            })
+        return info
+
+    mf = p / "books" / "manifest.json"
+    if mf.exists():
+        try:
+            info["epub"]["total"] = len(read_json(mf, []))
+        except Exception:
+            pass
+
+    dis = p / "books" / "disabled.json"
+    if dis.exists():
+        try:
+            info["epub"]["disabled"] = len(read_json(dis, []))
+        except Exception:
+            pass
+
+    ep = p / "progress.epub.json"
+    if ep.exists():
+        try:
+            info["epub"]["progress"] = read_json(ep, {}).get("last_index", 0)
+        except Exception:
+            pass
+
+    src = p / "data" / "source.csv"
+    if src.exists():
+        try:
+            lines = src.read_text(encoding="utf-8-sig").splitlines()
+            info["csv"]["total"] = max(0, len([l for l in lines if l.strip()]) - 1)
+        except Exception:
+            pass
+
+    cp = p / "data" / "progress.csv.txt"
+    if cp.exists():
+        try:
+            info["csv"]["progress"] = int(cp.read_text(encoding="ascii").strip() or 0)
+        except Exception:
+            pass
+
+    return info
+
+
+def write_progress(name, mode, value):
+    p = ROOT / name
+    value = int(value)
+    if mode == "epub":
+        write_json(p / "progress.epub.json", {"last_index": value})
+        return True
+    if mode == "csv":
+        write_text(p / "data" / "progress.csv.txt", str(value))
+        return True
+    return False
+
+
+def write_task_progress(name, task_id, value):
+    p = ROOT / name
+    cfg = read_json(REPOS_JSON, {})
+    repo_cfg = cfg.get("repos", {}).get(name, {})
+    tasks = repo_cfg.get("tasks", [])
+    for task in tasks:
+        if task.get("id") == task_id:
+            progress_rel = task.get("progress_file", "")
+            if not progress_rel:
+                return False
+            target = p / progress_rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(str(int(value)), encoding=_utf8)
+            return True
+    return False
+
+
+def list_books(name):
+    p = ROOT / name / "books"
+    enabled = []
+    disabled = []
+
+    mf = p / "manifest.json"
+    if mf.exists():
+        try:
+            enabled = read_json(mf, [])
+        except Exception:
+            enabled = []
+
+    dis = p / "disabled.json"
+    if dis.exists():
+        try:
+            disabled = read_json(dis, [])
+        except Exception:
+            disabled = []
+
+    disk_files = set()
+    if p.exists():
+        disk_files = {f.name for f in p.iterdir() if f.suffix.lower() == ".epub"}
+
+    manifest_files = {it.get("file") for it in enabled}
+    disabled_files = {it.get("file") for it in disabled}
+
+    orphans = []
+    for f in sorted(disk_files - manifest_files - disabled_files):
+        orphans.append({"file": f, "title": f})
+
+    return {"enabled": enabled, "disabled": disabled, "orphans": orphans}
+
+
+def rebuild_manifest(name):
+    p = ROOT / name / "books"
+    if not p.exists():
+        return False, "books 目录不存在"
+
+    epubs = sorted(
+        [f for f in p.iterdir() if f.suffix.lower() == ".epub"],
+        key=lambda f: f.name
+    )
+
+    manifest = [
+        {"index": i, "file": e.name, "title": e.name}
+        for i, e in enumerate(epubs, 1)
+    ]
+    write_json(p / "manifest.json", manifest)
+    return True, f"重建 {len(manifest)} 条"
+
+
+def reorder_books(name, file_order):
+    p = ROOT / name / "books"
+    new_manifest = [
+        {"index": i, "file": fname, "title": fname}
+        for i, fname in enumerate(file_order, 1)
+    ]
+    write_json(p / "manifest.json", new_manifest)
+    return True
+
+
+def disable_book(name, fname):
+    p = ROOT / name / "books"
+    mf = p / "manifest.json"
+    dis = p / "disabled.json"
+
+    manifest = read_json(mf, []) if mf.exists() else []
+    disabled = read_json(dis, []) if dis.exists() else []
+
+    new_manifest = [it for it in manifest if it.get("file") != fname]
+    if len(new_manifest) == len(manifest):
+        return False, "书不在启用列表"
+
+    disabled.append({"file": fname, "title": fname})
+    for i, it in enumerate(new_manifest, 1):
+        it["index"] = i
+
+    write_json(mf, new_manifest)
+    write_json(dis, disabled)
+    return True, ""
+
+
+def enable_book(name, fname):
+    p = ROOT / name / "books"
+    mf = p / "manifest.json"
+    dis = p / "disabled.json"
+
+    if not (p / fname).exists():
+        return False, f"文件不存在: {fname}"
+
+    manifest = read_json(mf, []) if mf.exists() else []
+    disabled = read_json(dis, []) if dis.exists() else []
+
+    if any(it.get("file") == fname for it in manifest):
+        return False, "书已在启用列表"
+
+    new_disabled = [it for it in disabled if it.get("file") != fname]
+    manifest.append({"index": len(manifest) + 1, "file": fname, "title": fname})
+
+    write_json(mf, manifest)
+    write_json(dis, new_disabled)
+    return True, ""
+
+
+def enable_all_orphans(name):
+    p = ROOT / name / "books"
+    mf = p / "manifest.json"
+    dis = p / "disabled.json"
+
+    manifest = read_json(mf, []) if mf.exists() else []
+    disabled = read_json(dis, []) if dis.exists() else []
+
+    disk_files = {f.name for f in p.iterdir() if f.suffix.lower() == ".epub"} if p.exists() else set()
+    manifest_files = {it.get("file") for it in manifest}
+    disabled_files = {it.get("file") for it in disabled}
+
+    orphans = sorted(disk_files - manifest_files - disabled_files)
+
+    for fname in orphans:
+        manifest.append({"index": len(manifest) + 1, "file": fname, "title": fname})
+
+    write_json(mf, manifest)
+    return True, f"加入 {len(orphans)} 本"
+
+
+def delete_book(name, fname):
+    p = ROOT / name / "books"
+    dis = p / "disabled.json"
+
+    disabled = read_json(dis, []) if dis.exists() else []
+    new_disabled = [it for it in disabled if it.get("file") != fname]
+    if len(new_disabled) == len(disabled):
+        return False, "书不在搁置列表"
+
+    target = p / fname
+    if target.exists():
+        try:
+            target.unlink()
+        except Exception as e:
+            return False, f"删文件失败: {e}"
+
+    write_json(dis, new_disabled)
+    return True, ""
+
+
+def preview(name, mode, from_index, count=5):
+    p = ROOT / name
+    result = []
+    if mode == "epub":
+        mf = p / "books" / "manifest.json"
+        if not mf.exists():
+            return result
+        manifest = read_json(mf, [])
+        for item in manifest:
+            if item.get("index", 0) >= from_index:
+                result.append({"index": item["index"], "title": item.get("title", item["file"])})
+                if len(result) >= count:
+                    break
+    elif mode == "csv":
+        src = p / "data" / "source.csv"
+        if not src.exists():
+            return result
+        lines = src.read_text(encoding="utf-8-sig").splitlines()
+        for i, line in enumerate(lines):
+            if i >= from_index and line.strip():
+                parts = line.split(",", 1)
+                result.append({"index": i, "title": parts[0].strip().strip('"')})
+                if len(result) >= count:
+                    break
+    return result
+
+
+def preview_task(name, task_id, from_index, count=5):
+    p = ROOT / name
+    cfg = read_json(REPOS_JSON, {})
+    repo_cfg = cfg.get("repos", {}).get(name, {})
+    tasks = repo_cfg.get("tasks", [])
+    for task in tasks:
+        if task.get("id") == task_id:
+            input_rel = task.get("input_file", "")
+            if not input_rel:
+                return []
+            input_path = p / input_rel
+            if not input_path.exists():
+                return []
+            lines = input_path.read_text(encoding="utf-8-sig").splitlines()
+            result = []
+            for i, line in enumerate(lines):
+                if i >= from_index and line.strip():
+                    parts = line.split(",", 1)
+                    title = parts[0].strip().strip('"')
+                    result.append({"index": i, "title": title})
+                    if len(result) >= count:
+                        break
+            return result
+    return []
+
+
+def apply_enabled_state():
+    cfg = read_json(REPOS_JSON, {})
+    repos = cfg.get("repos", {})
+    output = []
+
+    for name, repo_cfg in repos.items():
+        enabled = repo_cfg.get("enabled", True)
+
+        if "tasks" in repo_cfg and repo_cfg["tasks"]:
+            for task in repo_cfg["tasks"]:
+                wf = task.get("workflow", "")
+                if not wf:
+                    continue
+                path = ROOT / name / ".github" / "workflows" / wf
+                if not path.exists():
+                    continue
+                text = path.read_text(encoding="utf-8")
+                if enabled:
+                    text = re.sub(r'^(\s*)#\s*schedule:\s*\(disabled\)', r'\1schedule:', text, flags=re.M)
+                    text = re.sub(r'^(\s*)#\s*(- cron:)', r'\1\2', text, flags=re.M)
+                else:
+                    text = re.sub(r'^(\s*)schedule:\s*$', r'\1# schedule: (disabled)', text, flags=re.M)
+                    text = re.sub(r'^(\s*)(- cron:)', r'\1# \2', text, flags=re.M)
+                path.write_text(text, encoding="utf-8")
+                output.append(f"[{'ENABLED' if enabled else 'DISABLED'}] {name}/{wf}")
+            continue
+
+        for wf in ["epub-to-rss.yml", "csv-to-rss.yml"]:
+            path = ROOT / name / ".github" / "workflows" / wf
+            if not path.exists():
+                continue
+            text = path.read_text(encoding="utf-8")
+            lines = text.splitlines()
+            new_lines = []
+            i = 0
+            while i < len(lines):
+                line = lines[i]
+                if enabled:
+                    if re.match(r'^(\s*)#\s*schedule:\s*\(disabled\)', line):
+                        indent = re.match(r'^(\s*)', line).group(1)
+                        new_lines.append(f"{indent}schedule:")
+                        i += 1
+                        mode_key = "epub" if "epub" in wf else "csv"
+                        cron_val = repo_cfg.get("cron", {}).get(mode_key, "0 0 * * 1")
+                        while i < len(lines) and re.match(r'^(\s*)#\s*- cron:', lines[i]):
+                            cron_indent = re.match(r'^(\s*)', lines[i]).group(1)
+                            new_lines.append(f"{cron_indent}- cron: '{cron_val}'")
+                            i += 1
+                        continue
+                else:
+                    if re.match(r'^(\s*)schedule:\s*$', line):
+                        indent = re.match(r'^(\s*)', line).group(1)
+                        new_lines.append(f"{indent}# schedule: (disabled)")
+                        i += 1
+                        while i < len(lines) and re.match(r'^(\s*)- cron:', lines[i]):
+                            cron_indent = re.match(r'^(\s*)', lines[i]).group(1)
+                            new_lines.append(f"{cron_indent}# {lines[i].strip()}")
+                            i += 1
+                        continue
+
+                new_lines.append(line)
+                i += 1
+
+            new_text = "\n".join(new_lines)
+            if text.endswith("\n"):
+                new_text += "\n"
+            path.write_text(new_text, encoding="utf-8")
+            output.append(f"[{'ENABLED' if enabled else 'DISABLED'}] {name}/{wf}")
+
+    return "\n".join(output)
+
+
+def create_csv_task(name, fields):
+    """创建 CSV 任务：生成 yml + 写入 repos.json"""
+    p = ROOT / name
+    if not (p / ".git").exists():
+        return False, "非 git 仓库", []
+
+    task_id = fields.get("id", "").strip()
+    label = fields.get("label", "").strip()
+    lang = fields.get("lang", "").strip()
+    cron_val = fields.get("cron", "").strip()
+    input_file = fields.get("input_file", "").strip()
+    progress_file = fields.get("progress_file", "").strip()
+
+    if not task_id:
+        return False, "id 不能为空", []
+    if not re.match(r"^[a-z0-9][a-z0-9-]*$", task_id):
+        return False, "id 只能包含小写字母、数字、短横线", []
+    if not label:
+        return False, "显示名不能为空", []
+    if not cron_val:
+        return False, "cron 不能为空", []
+    if not input_file:
+        return False, "输入文件不能为空", []
+    if not progress_file:
+        return False, "进度文件不能为空", []
+
+    cfg = read_json(REPOS_JSON, {})
+    repos = cfg.get("repos", {})
+    repo_cfg = repos.get(name, {})
+    tasks = repo_cfg.get("tasks", [])
+
+    for t in tasks:
+        if t.get("id") == task_id:
+            return False, "任务 id 已存在: " + task_id, []
+
+    template_path = Path(__file__).parent / "templates" / "task-csv.yml.template"
+    if not template_path.exists():
+        return False, "模板文件不存在", []
+
+    template = template_path.read_text(encoding="utf-8")
+    yml_content = template
+    yml_content = yml_content.replace("__ID__", task_id)
+    yml_content = yml_content.replace("__CRON__", cron_val)
+    yml_content = yml_content.replace("__LANG__", lang)
+    yml_content = yml_content.replace("__INPUT_FILE__", input_file)
+    yml_content = yml_content.replace("__PROGRESS_FILE__", progress_file)
+
+    yml_dir = p / ".github" / "workflows"
+    yml_dir.mkdir(parents=True, exist_ok=True)
+    yml_path = yml_dir / ("task-" + task_id + ".yml")
+    if yml_path.exists():
+        return False, "workflow 文件已存在: " + yml_path.name, []
+    yml_path.write_text(yml_content, encoding="utf-8")
+
+    new_task = {
+        "id": task_id,
+        "label": label,
+        "lang": lang,
+        "type": "csv",
+        "workflow": "task-" + task_id + ".yml",
+        "cron": cron_val,
+        "input_file": input_file,
+        "progress_file": progress_file,
+    }
+    tasks.append(new_task)
+    repo_cfg["tasks"] = tasks
+    repos[name] = repo_cfg
+    cfg["repos"] = repos
+    write_json(REPOS_JSON, cfg)
+
+    warnings = []
+    if not (p / input_file).exists():
+        warnings.append(input_file + " 不存在")
+    if not (p / progress_file).parent.exists():
+        warnings.append(progress_file + " 的父目录不存在")
+
+    return True, "已创建任务 " + task_id, warnings
+
+
+def delete_csv_task(name, task_id):
+    """删除 CSV 任务：yml 移到 .disabled/，从 repos.json 移除"""
+    p = ROOT / name
+    if not (p / ".git").exists():
+        return False, "非 git 仓库", []
+
+    cfg = read_json(REPOS_JSON, {})
+    repos = cfg.get("repos", {})
+    repo_cfg = repos.get(name, {})
+    tasks = repo_cfg.get("tasks", [])
+
+    target = None
+    for t in tasks:
+        if t.get("id") == task_id:
+            target = t
+            break
+
+    if target is None:
+        return False, "任务不存在: " + task_id, []
+
+    if target.get("type") != "csv":
+        return False, "只能删除 csv 类型任务", []
+
+    wf_file = target.get("workflow", "task-" + task_id + ".yml")
+    yml_path = p / ".github" / "workflows" / wf_file
+    disabled_dir = p / ".github" / "workflows" / ".disabled"
+    disabled_dir.mkdir(parents=True, exist_ok=True)
+
+    if yml_path.exists():
+        target_path = disabled_dir / wf_file
+        if target_path.exists():
+            target_path.unlink()
+        yml_path.rename(target_path)
+
+    tasks = [t for t in tasks if t.get("id") != task_id]
+    repo_cfg["tasks"] = tasks
+    repos[name] = repo_cfg
+    cfg["repos"] = repos
+    write_json(REPOS_JSON, cfg)
+
+    return True, "已删除任务 " + task_id + " (yml 移到 .disabled/)", []
+
+
+def apply_gear(gear):
+    """切换档位：读 gears[gear] 批量写入所有仓库的 cron。
+    跳过 cron = '0 0 1 1 *'（禁用状态）的条目。"""
+    cfg = read_json(REPOS_JSON, {})
+    gears = cfg.get("gears", {})
+    if gear not in gears:
+        return False, "档位 '" + gear + "' 不存在"
+
+    gear_map = gears[gear]
+    repos = cfg.get("repos", {})
+    DISABLED = "0 0 1 1 *"
+
+    normal_applied = []
+    normal_skipped_all = []
+    normal_skipped_epub = []
+    normal_skipped_csv = []
+    task_applied = []
+    task_skipped = []
+
+    for name, value in gear_map.items():
+        if name not in repos:
+            continue
+
+        if isinstance(value, dict):
+            tasks = repos[name].get("tasks", [])
+            for task_id, days in value.items():
+                cron_str = "0 0 * * " + days
+                found = False
+                for task in tasks:
+                    if task.get("id") == task_id:
+                        found = True
+                        if task.get("cron") == DISABLED:
+                            task_skipped.append(name + "/" + task_id)
+                        else:
+                            task["cron"] = cron_str
+                            task_applied.append(name + "/" + task_id)
+                        break
+                if not found:
+                    task_skipped.append(name + "/" + task_id + " (未找到)")
+        else:
+            cron_str = "0 0 * * " + value
+            if "cron" not in repos[name]:
+                repos[name]["cron"] = {}
+            cur_epub = repos[name]["cron"].get("epub", "")
+            cur_csv = repos[name]["cron"].get("csv", "")
+            epub_dis = (cur_epub == DISABLED)
+            csv_dis = (cur_csv == DISABLED)
+
+            if epub_dis and csv_dis:
+                normal_skipped_all.append(name)
+                continue
+
+            if not epub_dis:
+                repos[name]["cron"]["epub"] = cron_str
+            else:
+                normal_skipped_epub.append(name)
+
+            if not csv_dis:
+                repos[name]["cron"]["csv"] = cron_str
+            else:
+                normal_skipped_csv.append(name)
+
+            normal_applied.append(name)
+
+    cfg["current_gear"] = gear
+    write_json(REPOS_JSON, cfg)
+
+    code, out, err = run_ps(r".\sync.ps1 -Apply")
+
+    lines = ["档位 " + gear + " 已处理"]
+    if normal_applied:
+        lines.append("  普通仓库已更新: " + str(len(normal_applied)))
+    if task_applied:
+        lines.append("  任务已更新: " + str(len(task_applied)))
+    if normal_skipped_all:
+        lines.append("  完全跳过(禁用): " + ", ".join(normal_skipped_all))
+    if normal_skipped_epub:
+        lines.append("  仅 EPUB 禁用: " + ", ".join(normal_skipped_epub))
+    if normal_skipped_csv:
+        lines.append("  仅 CSV 禁用: " + ", ".join(normal_skipped_csv))
+    if task_skipped:
+        lines.append("  任务跳过(禁用): " + ", ".join(task_skipped))
+    lines.append("")
+    lines.append(out)
+    return code == 0, "\n".join(lines)
+
+def update_task_config(name, task_id, fields):
+    p = ROOT / name
+    if not (p / '.git').exists():
+        return False, '非 git 仓库', []
+
+    cfg = read_json(REPOS_JSON, {})
+    repos = cfg.get('repos', {})
+    repo_cfg = repos.get(name, {})
+    tasks = repo_cfg.get('tasks', [])
+
+    target = None
+    for task in tasks:
+        if task.get('id') == task_id:
+            target = task
+            break
+
+    if target is None:
+        return False, '任务 ' + task_id + ' 不存在', []
+
+    allowed = ['label', 'lang', 'cron', 'batch_size', 'slice_mode',
+               'input_file', 'progress_file', 'prompt_file', 'model_name']
+    for k in allowed:
+        if k in fields:
+            target[k] = fields[k]
+
+    write_json(REPOS_JSON, cfg)
+
+    wf_file = target.get('workflow', '')
+    if not wf_file:
+        return False, 'workflow 字段缺失', []
+
+    yml_path = p / '.github' / 'workflows' / wf_file
+    if not yml_path.exists():
+        return False, 'workflow 文件不存在: ' + wf_file, []
+
+    ytext = yml_path.read_text(encoding='utf-8')
+
+    if 'cron' in fields:
+        ytext = re.sub(
+            r"(?m)^(\s*- cron: )'[^']*'",
+            lambda m: m.group(1) + chr(39) + fields['cron'] + chr(39),
+            ytext
+        )
+
+    env_map = {
+        'lang': 'LANG_CN',
+        'input_file': 'INPUT_FILE',
+        'progress_file': 'PROGRESS_FILE',
+        'prompt_file': 'PROMPT_FILE',
+        'slice_mode': 'SLICE_MODE',
+        'model_name': 'MODEL_NAME',
+    }
+    for field, env_name in env_map.items():
+        if field in fields:
+            pattern = r'(?m)^(\s*' + env_name + r':\s*)(?:"[^"]*"|.*)$'
+            replacement = r'\g<1>"' + fields[field] + '"'
+            ytext = re.sub(pattern, replacement, ytext)
+
+    if 'batch_size' in fields:
+        pattern = r'(?m)^(\s*BATCH_SIZE:\s*)\d+$'
+        replacement = r'\g<1>' + str(fields['batch_size'])
+        ytext = re.sub(pattern, replacement, ytext)
+
+    yml_path.write_text(ytext, encoding='utf-8')
+
+    warnings = []
+    for field in ['input_file', 'prompt_file']:
+        if field in fields and fields[field]:
+            fp = p / fields[field]
+            if not fp.exists():
+                warnings.append(fields[field] + ' 不存在')
+    if 'progress_file' in fields and fields['progress_file']:
+        fp = p / fields['progress_file']
+        if not fp.parent.exists():
+            warnings.append(fields['progress_file'] + ' 的父目录不存在')
+
+    return True, '已保存 ' + task_id, warnings
+
+
+def sync_progress(name):
+    p = ROOT / name
+    if not (p / ".git").exists():
+        return False, "非 git 仓库"
+
+    r = subprocess.run(
+        ["git", "-C", str(p), "fetch", "origin", "main"],
+        capture_output=True, text=True, timeout=60
+    )
+    if r.returncode != 0:
+        return False, f"fetch 失败: {r.stderr.strip()}"
+
+    cfg = read_json(REPOS_JSON, {})
+    repo_cfg = cfg.get("repos", {}).get(name, {})
+
+    files = []
+    if "tasks" in repo_cfg and repo_cfg["tasks"]:
+        for task in repo_cfg["tasks"]:
+            pf = task.get("progress_file", "")
+            if pf:
+                files.append(pf)
+    else:
+        files = ["progress.epub.json", "data/progress.csv.txt"]
+
+    ok_files = []
+    for f in files:
+        check = subprocess.run(
+            ["git", "-C", str(p), "cat-file", "-e", f"origin/main:{f}"],
+            capture_output=True
+        )
+        if check.returncode == 0:
+            co = subprocess.run(
+                ["git", "-C", str(p), "checkout", "origin/main", "--", f],
+                capture_output=True, text=True, timeout=30
+            )
+            if co.returncode == 0:
+                ok_files.append(f)
+
+    if not ok_files:
+        return False, "远程无进度文件"
+    return True, f"已同步: {', '.join(ok_files)}"
+
+
+def check_network():
+    now = time.time()
+    if _net_cache["ms"] is not None and now - _net_cache["time"] < 60:
+        return _net_cache["ms"]
+    try:
+        start = time.time()
+        r = subprocess.run(["gh", "api", "rate_limit"],
+                           capture_output=True, timeout=15)
+        ms = int((time.time() - start) * 1000)
+        if r.returncode == 0:
+            _net_cache["ms"] = ms
+            _net_cache["time"] = now
+            return ms
+    except Exception:
+        pass
+    return None
+
+
+def health_check(name, net_ms=None):
+    p = ROOT / name
+    result = {
+        "name": name,
+        "actions": {"ok": None, "msg": ""},
+        "git":     {"ok": None, "msg": "", "ahead": 0, "behind": 0, "dirty": 0},
+        "progress":{"ok": None, "msg": "", "tasks": []},
+        "feed":    {"ok": None, "msg": "", "age_hours": None},
+        "network": {"ok": None, "msg": ""},
+        "level": "green",
+        "suggestions": []
+    }
+
+    if not (p / ".git").exists():
+        result["level"] = "red"
+        result["suggestions"].append("仓库不存在")
+        return result
+
+    try:
+        r = subprocess.run(
+            ["gh", "run", "list", "--repo", f"ZHENHUA001A307/{name}",
+             "--limit", "1", "--json", "conclusion,status,createdAt,workflowName"],
+            capture_output=True, text=True, timeout=30
+        )
+        if r.returncode == 0:
+            runs = json.loads(r.stdout or "[]")
+            if runs:
+                latest = runs[0]
+                concl = latest.get("conclusion") or latest.get("status")
+                wf_name = latest.get("workflowName", "")
+                if concl == "success":
+                    result["actions"]["ok"] = True
+                    result["actions"]["msg"] = f"最近成功 ({wf_name})"
+                elif concl == "failure":
+                    result["actions"]["ok"] = False
+                    result["actions"]["msg"] = f"最近失败 ({wf_name})"
+                    result["suggestions"].append("Actions 最近失败，去 GitHub 看日志")
+                else:
+                    result["actions"]["ok"] = None
+                    result["actions"]["msg"] = str(concl)
+            else:
+                result["actions"]["ok"] = None
+                result["actions"]["msg"] = "无记录"
+        else:
+            result["actions"]["ok"] = None
+            result["actions"]["msg"] = "查询失败"
+    except Exception as e:
+        result["actions"]["msg"] = str(e)[:60]
+
+    try:
+        r = subprocess.run(
+            ["git", "-C", str(p), "rev-list", "--left-right", "--count", "@{u}...HEAD"],
+            capture_output=True, text=True, timeout=10
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            parts = r.stdout.strip().split()
+            behind = int(parts[0])
+            ahead = int(parts[1])
+            result["git"]["behind"] = behind
+            result["git"]["ahead"] = ahead
+
+        r2 = subprocess.run(
+            ["git", "-C", str(p), "status", "--porcelain"],
+            capture_output=True, text=True, timeout=10
+        )
+        result["git"]["dirty"] = len([l for l in r2.stdout.splitlines() if l.strip()])
+
+        if result["git"]["ahead"] > 0 and result["git"]["behind"] > 0:
+            result["git"]["ok"] = False
+            result["git"]["msg"] = f"分叉 (本地+{result['git']['ahead']}, 远程+{result['git']['behind']})"
+            result["suggestions"].append("本地和远程分叉，需手动处理")
+        elif result["git"]["ahead"] > 0:
+            result["git"]["ok"] = False
+            result["git"]["msg"] = f"本地有 {result['git']['ahead']} 个未推送"
+        elif result["git"]["behind"] > 0:
+            result["git"]["ok"] = False
+            result["git"]["msg"] = f"本地落后 {result['git']['behind']} 个"
+            result["suggestions"].append("本地落后远程，点同步进度或批量 Push")
+        elif result["git"]["dirty"] > 0:
+            result["git"]["ok"] = None
+            result["git"]["msg"] = f"{result['git']['dirty']} 个未提交"
+        else:
+            result["git"]["ok"] = True
+            result["git"]["msg"] = "干净"
+    except Exception as e:
+        result["git"]["msg"] = str(e)[:60]
+
+    try:
+        cfg = read_json(REPOS_JSON, {})
+        repo_cfg = cfg.get("repos", {}).get(name, {})
+
+        if "tasks" in repo_cfg and repo_cfg["tasks"]:
+            any_diff = False
+            for task in repo_cfg["tasks"]:
+                tid = task.get("id", "")
+                label = task.get("label", tid)
+                pf = task.get("progress_file", "")
+
+                local_val = None
+                remote_val = None
+
+                if pf:
+                    lp = p / pf
+                    if lp.exists():
+                        try:
+                            local_val = int(lp.read_text(encoding="ascii").strip() or 0)
+                        except Exception:
+                            local_val = "坏文件"
+
+                    r = subprocess.run(
+                        ["git", "-C", str(p), "show", f"origin/main:{pf}"],
+                        capture_output=True, text=True, timeout=10
+                    )
+                    if r.returncode == 0:
+                        try:
+                            remote_val = int(r.stdout.strip() or 0)
+                        except Exception:
+                            pass
+
+                diff = (isinstance(local_val, int) and isinstance(remote_val, int) and local_val != remote_val)
+                if diff:
+                    any_diff = True
+
+                result["progress"]["tasks"].append({
+                    "id": tid,
+                    "label": label,
+                    "local": local_val,
+                    "remote": remote_val,
+                    "diff": diff,
+                })
+
+            if any_diff:
+                result["progress"]["ok"] = False
+                result["progress"]["msg"] = "部分任务进度不一致"
+                result["suggestions"].append("部分任务进度不一致，点同步进度")
+            elif result["progress"]["tasks"]:
+                result["progress"]["ok"] = True
+                result["progress"]["msg"] = "一致"
+            else:
+                result["progress"]["ok"] = None
+                result["progress"]["msg"] = "无进度文件"
+        else:
+            le = None
+            re_ = None
+            lc = None
+            rc = None
+
+            ep = p / "progress.epub.json"
+            if ep.exists():
+                try:
+                    le = read_json(ep, {}).get("last_index")
+                except Exception:
+                    le = "坏文件"
+
+            cp = p / "data" / "progress.csv.txt"
+            if cp.exists():
+                try:
+                    lc = int(cp.read_text(encoding="ascii").strip() or 0)
+                except Exception:
+                    lc = "坏文件"
+
+            r = subprocess.run(
+                ["git", "-C", str(p), "show", "origin/main:progress.epub.json"],
+                capture_output=True, text=True, timeout=10
+            )
+            if r.returncode == 0:
+                try:
+                    re_ = json.loads(r.stdout).get("last_index")
+                except Exception:
+                    pass
+
+            r = subprocess.run(
+                ["git", "-C", str(p), "show", "origin/main:data/progress.csv.txt"],
+                capture_output=True, text=True, timeout=10
+            )
+            if r.returncode == 0:
+                try:
+                    rc = int(r.stdout.strip() or 0)
+                except Exception:
+                    pass
+
+            result["progress"]["tasks"].append({
+                "id": "epub",
+                "label": "EPUB",
+                "local": le,
+                "remote": re_,
+                "diff": (isinstance(le, int) and isinstance(re_, int) and le != re_),
+            })
+            result["progress"]["tasks"].append({
+                "id": "csv",
+                "label": "CSV",
+                "local": lc,
+                "remote": rc,
+                "diff": (isinstance(lc, int) and isinstance(rc, int) and lc != rc),
+            })
+
+            diffs = []
+            if isinstance(le, int) and isinstance(re_, int) and le != re_:
+                diffs.append(f"EPUB 本地{le}≠远程{re_}")
+            if isinstance(lc, int) and isinstance(rc, int) and lc != rc:
+                diffs.append(f"CSV 本地{lc}≠远程{rc}")
+
+            if diffs:
+                result["progress"]["ok"] = False
+                result["progress"]["msg"] = "; ".join(diffs)
+                if isinstance(le, int) and isinstance(re_, int) and re_ > le:
+                    result["suggestions"].append("远程 EPUB 进度更新，点同步进度")
+                if isinstance(lc, int) and isinstance(rc, int) and rc > lc:
+                    result["suggestions"].append("远程 CSV 进度更新，点同步进度")
+            elif isinstance(le, int) or isinstance(lc, int):
+                result["progress"]["ok"] = True
+                result["progress"]["msg"] = "一致"
+            else:
+                result["progress"]["ok"] = None
+                result["progress"]["msg"] = "无进度文件"
+    except Exception as e:
+        result["progress"]["msg"] = str(e)[:60]
+
+    try:
+        feed = p / "feed.xml"
+        if feed.exists():
+            text = feed.read_text(encoding="utf-8-sig", errors="ignore")
+            m = re.search(r"<lastBuildDate>([^<]+)</lastBuildDate>", text)
+            if not m:
+                # 兼容：无 lastBuildDate 时，从第一条 item 的 pubDate 推断
+                m = re.search(r"<pubDate>([^<]+)</pubDate>", text)
+            if m:
+                try:
+                    dt = parsedate_to_datetime(m.group(1))
+                    age_h = (datetime.datetime.now(datetime.timezone.utc) - dt).total_seconds() / 3600
+                    result["feed"]["age_hours"] = round(age_h, 1)
+                    if age_h > 24 * 30:
+                        result["feed"]["ok"] = False
+                        result["feed"]["msg"] = f"{age_h/24:.0f} 天前"
+                        result["suggestions"].append("Feed 超过 30 天未更新")
+                    elif age_h > 24 * 14:
+                        result["feed"]["ok"] = None
+                        result["feed"]["msg"] = f"{age_h/24:.0f} 天前"
+                    else:
+                        result["feed"]["ok"] = True
+                        result["feed"]["msg"] = f"{age_h:.0f} 小时前"
+                except Exception:
+                    result["feed"]["msg"] = "日期解析失败"
+            else:
+                result["feed"]["ok"] = None
+                result["feed"]["msg"] = "无 lastBuildDate"
+        else:
+            result["feed"]["ok"] = False
+            result["feed"]["msg"] = "无 feed.xml"
+    except Exception as e:
+        result["feed"]["msg"] = str(e)[:60]
+
+    if net_ms is not None:
+        result["network"]["ok"] = net_ms < 3000
+        result["network"]["msg"] = f"{net_ms}ms"
+    else:
+        result["network"]["ok"] = False
+        result["network"]["msg"] = "超时"
+
+    red = sum(1 for k in ["actions", "git", "progress", "feed", "network"] if result[k]["ok"] is False)
+    yellow = sum(1 for k in ["actions", "git", "progress", "feed", "network"] if result[k]["ok"] is None)
+    if red > 0:
+        result["level"] = "red"
+    elif yellow > 0:
+        result["level"] = "yellow"
+    else:
+        result["level"] = "green"
+
+    return result
+
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def log_message(self, fmt, *args):
+        pass
+
+    def _send(self, code, body, ctype="application/json; charset=utf-8"):
+        if isinstance(body, str):
+            body = body.encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _json(self, obj, code=200):
+        self._send(code, json.dumps(obj, ensure_ascii=False))
+
+    def _read_body(self):
+        n = int(self.headers.get("Content-Length", "0"))
+        return self.rfile.read(n).decode("utf-8") if n else ""
+
+    def _parts(self):
+        return [p for p in urllib.parse.urlparse(self.path).path.split("/") if p]
+
+    def _query(self):
+        return urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+
+    def do_GET(self):
+        parts = self._parts()
+
+        if not parts:
+            html = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
+            self._send(200, html, "text/html; charset=utf-8")
+            return
+
+        if parts == ["api", "config"]:
+            self._json(read_json(REPOS_JSON))
+            return
+
+        if parts == ["api", "status"]:
+            cfg = read_json(REPOS_JSON, {})
+            out = {name: git_status(name) for name in cfg.get("repos", {})}
+            self._json(out)
+            return
+
+        if len(parts) == 3 and parts[0] == "api" and parts[1] == "repo-info":
+            self._json(repo_info(parts[2]))
+            return
+
+        if len(parts) == 3 and parts[0] == "api" and parts[1] == "books":
+            self._json(list_books(parts[2]))
+            return
+
+        if len(parts) == 4 and parts[0] == "api" and parts[1] == "preview":
+            q = self._query()
+            frm = int(q.get("from", ["0"])[0])
+            cnt = int(q.get("count", ["5"])[0])
+            self._json(preview(parts[2], parts[3], frm, cnt))
+            return
+
+        if len(parts) == 4 and parts[0] == "api" and parts[1] == "preview-task":
+            q = self._query()
+            frm = int(q.get("from", ["0"])[0])
+            cnt = int(q.get("count", ["5"])[0])
+            self._json(preview_task(parts[2], parts[3], frm, cnt))
+            return
+
+        if parts == ["api", "health-all"]:
+            net_ms = check_network()
+            cfg = read_json(REPOS_JSON, {})
+            out = {}
+            for name in cfg.get("repos", {}):
+                out[name] = health_check(name, net_ms)
+            self._json(out)
+            return
+
+        if len(parts) == 3 and parts[0] == "api" and parts[1] == "health":
+            net_ms = check_network()
+            self._json(health_check(parts[2], net_ms))
+            return
+
+        self._send(404, "not found", "text/plain")
+
+    def do_POST(self):
+        parts = self._parts()
+        body = self._read_body()
+
+        try:
+            if parts == ["api", "config"]:
+                data = json.loads(body)
+                with _lock:
+                    write_json(REPOS_JSON, data)
+                self._json({"ok": True})
+                return
+
+            if parts == ["api", "apply-gear"]:
+                data = json.loads(body)
+                ok, msg = apply_gear(data.get("gear"))
+                self._json({"ok": ok, "output": msg})
+                return
+
+            if len(parts) == 3 and parts[0] == "api" and parts[1] == "create-csv-task":
+                data = json.loads(body)
+                ok, msg, warnings = create_csv_task(parts[2], data)
+                self._json({"ok": ok, "output": msg, "warnings": warnings})
+                return
+
+            if len(parts) == 4 and parts[0] == "api" and parts[1] == "delete-csv-task":
+                ok, msg, warnings = delete_csv_task(parts[2], parts[3])
+                self._json({"ok": ok, "output": msg, "warnings": warnings})
+                return
+
+            if parts == ["api", "apply"]:
+                code, out, err = run_ps(r".\sync.ps1 -Apply")
+                out2 = apply_enabled_state() if code == 0 else ""
+                self._json({"ok": code == 0, "output": out + "\n" + out2, "error": err})
+                return
+
+            if parts == ["api", "push"]:
+                code, out, err = run_ps(self._push_script(), timeout=600)
+                self._json({"ok": code == 0, "output": out, "error": err})
+                return
+
+            if len(parts) == 3 and parts[0] == "api" and parts[1] == "progress":
+                data = json.loads(body)
+                ok = write_progress(parts[2], data.get("mode"), data.get("value"))
+                self._json({"ok": ok})
+                return
+
+            if len(parts) == 4 and parts[0] == "api" and parts[1] == "task-progress":
+                data = json.loads(body)
+                ok = write_task_progress(parts[2], parts[3], data.get("value"))
+                self._json({"ok": ok})
+                return
+
+            if len(parts) == 4 and parts[0] == 'api' and parts[1] == 'task-config':
+                name = parts[2]
+                task_id = parts[3]
+                data = json.loads(body)
+                ok, msg, warnings = update_task_config(name, task_id, data)
+                self._json({'ok': ok, 'output': msg, 'warnings': warnings})
+                return
+
+            if len(parts) == 4 and parts[0] == "api" and parts[1] == "workflow":
+                name, mode = parts[2], parts[3]
+                wf_name = "EPUB to RSS" if mode == "epub" else "CSV to RSS"
+                r = subprocess.run(
+                    ["gh", "workflow", "run", wf_name, "--repo", f"ZHENHUA001A307/{name}"],
+                    capture_output=True, text=True, timeout=30)
+                self._json({"ok": r.returncode == 0, "output": r.stdout, "error": r.stderr})
+                return
+
+            if len(parts) == 4 and parts[0] == "api" and parts[1] == "trigger-task":
+                name = parts[2]
+                task_id = parts[3]
+                cfg = read_json(REPOS_JSON, {})
+                repo_cfg = cfg.get("repos", {}).get(name, {})
+                tasks = repo_cfg.get("tasks", [])
+                wf_file = None
+                for task in tasks:
+                    if task.get("id") == task_id:
+                        wf_file = task.get("workflow", "")
+                        break
+                if not wf_file:
+                    self._json({"ok": False, "error": f"task {task_id} 不存在"})
+                    return
+                r = subprocess.run(
+                    ["gh", "workflow", "run", wf_file, "--repo", f"ZHENHUA001A307/{name}"],
+                    capture_output=True, text=True, timeout=30)
+                self._json({"ok": r.returncode == 0, "output": r.stdout, "error": r.stderr})
+                return
+
+            if len(parts) == 3 and parts[0] == "api" and parts[1] == "sync-progress":
+                name = parts[2]
+                ok, msg = sync_progress(name)
+                self._json({"ok": ok, "output": msg})
+                return
+
+            if parts == ["api", "sync-progress-all"]:
+                cfg = read_json(REPOS_JSON, {})
+                output = []
+                success = 0
+                for name in cfg.get("repos", {}):
+                    ok, msg = sync_progress(name)
+                    mark = "OK" if ok else "FAIL"
+                    output.append(f"[{mark}] {name}: {msg}")
+                    if ok:
+                        success += 1
+                total = len(cfg.get("repos", {}))
+                self._json({"ok": True, "output": "\n".join(output),
+                            "summary": f"{success}/{total}"})
+                return
+
+            if len(parts) == 4 and parts[0] == "api" and parts[1] == "books":
+                name, action = parts[2], parts[3]
+                data = json.loads(body) if body else {}
+
+                if action == "rebuild-manifest":
+                    ok, msg = rebuild_manifest(name)
+                    self._json({"ok": ok, "output": msg, "error": "" if ok else msg})
+                    return
+                if action == "enable-all-orphans":
+                    ok, msg = enable_all_orphans(name)
+                    self._json({"ok": ok, "output": msg})
+                    return
+                if action == "reorder":
+                    reorder_books(name, data.get("files", []))
+                    self._json({"ok": True})
+                    return
+                if action == "disable":
+                    ok, err = disable_book(name, data.get("file"))
+                    self._json({"ok": ok, "error": err})
+                    return
+                if action == "enable":
+                    ok, err = enable_book(name, data.get("file"))
+                    self._json({"ok": ok, "error": err})
+                    return
+                if action == "delete":
+                    ok, err = delete_book(name, data.get("file"))
+                    self._json({"ok": ok, "error": err})
+                    return
+
+            self._send(404, "not found", "text/plain")
+        except Exception as e:
+            self._json({"ok": False, "error": str(e)}, 500)
+
+    def _push_script(self):
+        return r'''
+$root = "E:\2_Assets\E2_1 RSS"
+$master = Get-Content "$root\_master\repos.json" -Raw -Encoding UTF8 | ConvertFrom-Json
+foreach ($r in $master.repos.PSObject.Properties.Name) {
+    $p = "$root\$r"
+    if (-not (Test-Path "$p\.git")) { continue }
+    Write-Host "== $r =="
+
+    $rebaseDir = "$p\.git\rebase-merge"
+    $rebaseApply = "$p\.git\rebase-apply"
+    if ((Test-Path $rebaseDir) -or (Test-Path $rebaseApply)) {
+        git -C $p rebase --abort 2>&1 | Out-Null
+        Write-Host "  [CLEANED] 清理残留 rebase"
+    }
+
+    git -C $p add -A
+    git -C $p commit -m "Update from webui" 2>&1 | Out-Null
+
+    git -C $p pull --rebase origin main 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        git -C $p rebase --abort 2>&1 | Out-Null
+        Write-Host "  [REBASE FAILED] 用 force push 覆盖远程"
+        git -C $p push --force origin main 2>&1 | Out-Null
+        if ($LASTEXITCODE -eq 0) { Write-Host "  [FORCED]" } else { Write-Host "  [FAIL]" }
+    } else {
+        git -C $p push 2>&1 | Out-Null
+        if ($LASTEXITCODE -eq 0) { Write-Host "  [PUSHED]" } else { Write-Host "  [FAIL]" }
+    }
+}
+'''
+
+
+def main():
+    if not REPOS_JSON.exists():
+        print(f"未找到 {REPOS_JSON}", file=sys.stderr)
+        sys.exit(1)
+    os.chdir(str(MASTER))
+    server = http.server.ThreadingHTTPServer((HOST, PORT), Handler)
+    print(f"RSS 管理工具已启动: http://{HOST}:{PORT}")
+    print("按 Ctrl+C 停止")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\n已停止")
+        server.shutdown()
+
+
+if __name__ == "__main__":
+    main()

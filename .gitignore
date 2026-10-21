@@ -1,0 +1,25 @@
+﻿# 备份文件
+*.bak
+*.tmp
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+
+# Node
+node_modules/
+
+# 系统/编辑器
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# 日志与本地配置
+*.log
+.env
+.env.*

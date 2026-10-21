@@ -1,0 +1,121 @@
+name: Task __ID__
+
+on:
+  schedule:
+    - cron: '__CRON__'
+  workflow_dispatch:
+
+concurrency:
+  group: rss-update-${{ github.repository }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  LANG_CN: "__LANG__"
+  INPUT_FILE: "__INPUT_FILE__"
+  PROGRESS_FILE: "__PROGRESS_FILE__"
+  RSS_FILE: "feed.xml"
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate feed
+        shell: python
+        run: |
+          import os, csv, datetime, re
+          import xml.etree.ElementTree as ET
+
+          repo_name = os.environ.get('GITHUB_REPOSITORY', 'unknown/repo')
+
+          LANG_CN = os.getenv('LANG_CN', '语言')
+          INPUT_FILE = os.getenv('INPUT_FILE', '')
+          PROGRESS_FILE = os.getenv('PROGRESS_FILE', '')
+          FEED = os.getenv('RSS_FILE', 'feed.xml')
+
+          # 保证父目录存在
+          for p in [PROGRESS_FILE, FEED]:
+              d = os.path.dirname(p)
+              if d:
+                  os.makedirs(d, exist_ok=True)
+
+          if not os.path.exists(PROGRESS_FILE):
+              with open(PROGRESS_FILE, 'w', encoding='utf-8') as f:
+                  f.write('0')
+          with open(PROGRESS_FILE, encoding='utf-8-sig') as f:
+              try:
+                  idx = int(f.read().strip())
+              except:
+                  idx = 0
+
+          rows = []
+          if os.path.exists(INPUT_FILE):
+              with open(INPUT_FILE, encoding='utf-8-sig') as f:
+                  rows = [r for r in csv.reader(f) if r]
+              if rows:
+                  rows = rows[1:]  # 跳过表头
+
+          if idx >= len(rows):
+              print('All CSV rows done.')
+              exit(0)
+
+          row = rows[idx]
+          title = row[0].strip() if len(row) > 0 else '无标题'
+          link  = row[1].strip() if len(row) > 1 else ''
+          body  = row[2].strip() if len(row) > 2 else ''
+          pub   = datetime.datetime.now().strftime('%a, %d %b %Y %H:%M:%S +0000')
+          guid  = link if link else f'csv-{idx}'
+
+          new_item = f'''<item>
+          <title><![CDATA[[{LANG_CN}] {title}]]></title>
+          <link>{link}</link>
+          <description><![CDATA[{body}]]></description>
+          <guid isPermaLink="false">{guid}</guid>
+          <pubDate>{pub}</pubDate>
+          </item>'''
+
+          old = []
+          if os.path.exists(FEED):
+              try:
+                  root = ET.parse(FEED).getroot()
+                  for it in root.findall('./channel/item'):
+                      pub_el = it.find('pubDate')
+                      old.append((pub_el.text if pub_el is not None else '', ET.tostring(it, encoding='unicode')))
+              except Exception as e:
+                  print(f'Parse error: {e}')
+
+          old.append((pub, new_item))
+          old.sort(key=lambda x: x[0], reverse=True)
+          final = [x[1] for x in old[:20]]
+
+          rss = f'''<?xml version="1.0" encoding="UTF-8" ?>
+          <rss version="2.0">
+          <channel>
+          <title>AI 语言学习推送源</title>
+          <link>https://github.com/{repo_name}</link>
+          <description>由 DeepSeek 驱动的自动化语言学习 RSS 推送</description>
+          <lastBuildDate>{pub}</lastBuildDate>
+          {chr(10).join(final)}
+          </channel>
+          </rss>'''
+
+          with open(FEED, 'w', encoding='utf-8') as f:
+              f.write(rss)
+          with open(PROGRESS_FILE, 'w', encoding='utf-8') as f:
+              f.write(str(idx + 1))
+          print(f'Done: {title}')
+
+      - name: Commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add feed.xml "${{ env.PROGRESS_FILE }}"
+          git commit -m "Task __ID__ update: $(date)" || exit 0
+          git pull --rebase -X theirs origin main || git rebase --abort
+          git push

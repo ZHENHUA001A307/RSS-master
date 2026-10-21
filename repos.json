@@ -1,0 +1,335 @@
+{
+  "owner": "ZHENHUA001A307",
+  "current_gear": "1",
+  "defaults": {
+    "feed": {
+      "rss_size": 20
+    },
+    "epub": {
+      "reading_speed": 300,
+      "daily_budget_min": 30,
+      "priority": 5
+    },
+    "csv": {
+      "has_header": true,
+      "source_file": "data/source.csv",
+      "daily_budget_min": 15,
+      "priority": 5
+    }
+  },
+  "gears": {
+    "1": {
+      "computer-engineering": "3",
+      "financial-knowledge": "3",
+      "applied-foreign-lang": {
+        "study-en": "3",
+        "study-jp": "6"
+      },
+      "comprehensive-tech": "3",
+      "civic-spirit": "6",
+      "story-post": "6",
+      "the-little-newsstand": "6",
+      "echos-of-the-sages": "6",
+      "radio-memory": "6",
+      "view-of-the-world": "6",
+      "where-thoughts-unfold": "6",
+      "art-promenade": "6",
+      "the-base": "6",
+      "time-collection": "6"
+    },
+    "2": {
+      "computer-engineering": "1,4",
+      "financial-knowledge": "1,4",
+      "applied-foreign-lang": {
+        "study-en": "1,4",
+        "study-jp": "1,6"
+      },
+      "comprehensive-tech": "1,4",
+      "civic-spirit": "3,6",
+      "story-post": "1,6",
+      "the-little-newsstand": "6",
+      "echos-of-the-sages": "5,6",
+      "radio-memory": "3,6",
+      "view-of-the-world": "4,6",
+      "where-thoughts-unfold": "2,6",
+      "art-promenade": "6",
+      "the-base": "3,6",
+      "time-collection": "3,6"
+    },
+    "3": {
+      "computer-engineering": "1,4,5",
+      "financial-knowledge": "1,4,5",
+      "applied-foreign-lang": {
+        "study-en": "1,4,5",
+        "study-jp": "1,3,6"
+      },
+      "comprehensive-tech": "1,4,5",
+      "civic-spirit": "3,6",
+      "story-post": "1,6",
+      "the-little-newsstand": "6",
+      "echos-of-the-sages": "5,6",
+      "radio-memory": "3,6",
+      "view-of-the-world": "4,6",
+      "where-thoughts-unfold": "2,6",
+      "art-promenade": "6",
+      "the-base": "3,6",
+      "time-collection": "3,6"
+    }
+  },
+  "repos": {
+    "computer-engineering": {
+      "feed": {
+        "title": "科目一：计算机工程",
+        "description": "计算机工程材料推送"
+      },
+      "cron": {
+        "epub": "0 0 * * 3",
+        "csv": "0 0 * * 3"
+      },
+      "enabled": true,
+      "epub": {
+        "reading_speed": 300,
+        "daily_budget_min": 30,
+        "priority": 5
+      }
+    },
+    "financial-knowledge": {
+      "feed": {
+        "title": "科目二：金融财务",
+        "description": "金融投资知识分享"
+      },
+      "cron": {
+        "epub": "0 0 * * 3",
+        "csv": "0 0 1 1 *"
+      },
+      "enabled": true,
+      "epub": {
+        "reading_speed": 300,
+        "daily_budget_min": 30,
+        "priority": 5
+      }
+    },
+    "applied-foreign-lang": {
+      "feed": {
+        "title": "科目三：应用外国语",
+        "description": "译林晚径：句子精读与语言学习材料"
+      },
+      "enabled": true,
+      "tasks": [
+        {
+          "id": "study-en",
+          "label": "精读-EN",
+          "type": "study",
+          "lang": "英语",
+          "workflow": "study_en.yml",
+          "cron": "0 0 1 1 *",
+          "input_file": "corpus/input_en.csv",
+          "progress_file": "progress/last_index_en.txt",
+          "batch_size": 15,
+          "prompt_file": "prompts/en_prompt.json",
+          "model_name": "deepseek-v4-pro",
+          "slice_mode": "by_count"
+        },
+        {
+          "id": "study-jp",
+          "label": "精读-JP",
+          "type": "study",
+          "lang": "日语",
+          "workflow": "study_jp.yml",
+          "cron": "0 0 1 1 *",
+          "input_file": "corpus/input_jp.csv",
+          "progress_file": "progress/last_index_jp.txt",
+          "batch_size": 20,
+          "prompt_file": "prompts/jp_prompt.json",
+          "model_name": "deepseek-v4-pro"
+        },
+        {
+          "id": "bbc-6-minutes-english",
+          "label": "BBC 6 Minutes English",
+          "lang": "英语",
+          "type": "csv",
+          "workflow": "task-bbc-6-minutes-english.yml",
+          "cron": "0 0 1 1 *",
+          "input_file": "corpus/bbc-6-minutes-english.csv",
+          "progress_file": "progress/bbc-6-minutes-english.txt"
+        }
+      ]
+    },
+    "comprehensive-tech": {
+      "feed": {
+        "title": "科目四：综合技术知识",
+        "description": "各类技术知识分享"
+      },
+      "cron": {
+        "epub": "0 0 * * 3",
+        "csv": "0 0 1 1 *"
+      },
+      "enabled": true,
+      "epub": {
+        "reading_speed": 300,
+        "daily_budget_min": 30,
+        "priority": 5
+      }
+    },
+    "civic-spirit": {
+      "feed": {
+        "title": "副刊：经世书苑",
+        "description": "永久计划-未编制书籍推送"
+      },
+      "cron": {
+        "epub": "0 0 * * 6",
+        "csv": "0 0 1 1 *"
+      },
+      "enabled": true,
+      "epub": {
+        "reading_speed": 300,
+        "daily_budget_min": 30,
+        "priority": 5
+      }
+    },
+    "story-post": {
+      "feed": {
+        "title": "副刊：故事驿站",
+        "description": "微小说、今古奇观及神话民俗传说推送"
+      },
+      "cron": {
+        "epub": "0 0 * * 6",
+        "csv": "0 0 1 1 *"
+      },
+      "enabled": true,
+      "epub": {
+        "reading_speed": 300,
+        "daily_budget_min": 30,
+        "priority": 5
+      }
+    },
+    "the-little-newsstand": {
+      "feed": {
+        "title": "副刊：小小报亭",
+        "description": "经典文学旧杂志推送"
+      },
+      "cron": {
+        "epub": "0 0 * * 6",
+        "csv": "0 0 1 1 *"
+      },
+      "enabled": true,
+      "epub": {
+        "reading_speed": 300,
+        "daily_budget_min": 30,
+        "priority": 5
+      }
+    },
+    "echos-of-the-sages": {
+      "feed": {
+        "title": "副刊：古韵流芳",
+        "description": "先秦至清诗词曲杂剧"
+      },
+      "cron": {
+        "epub": "0 0 * * 6",
+        "csv": "0 0 1 1 *"
+      },
+      "enabled": true,
+      "epub": {
+        "reading_speed": 300,
+        "daily_budget_min": 30,
+        "priority": 5
+      }
+    },
+    "radio-memory": {
+      "feed": {
+        "title": "副刊：广播载忆",
+        "description": "音频广播内容推送"
+      },
+      "cron": {
+        "epub": "0 0 1 1 *",
+        "csv": "0 0 * * 6"
+      },
+      "enabled": true,
+      "epub": {
+        "reading_speed": 300,
+        "daily_budget_min": 30,
+        "priority": 5
+      }
+    },
+    "view-of-the-world": {
+      "feed": {
+        "title": "副刊：世界透镜",
+        "description": "世界透镜材料推送"
+      },
+      "cron": {
+        "epub": "0 0 * * 6",
+        "csv": "0 0 1 1 *"
+      },
+      "enabled": true,
+      "epub": {
+        "reading_speed": 300,
+        "daily_budget_min": 30,
+        "priority": 5
+      }
+    },
+    "where-thoughts-unfold": {
+      "feed": {
+        "title": "副刊：心灵花园",
+        "description": "中西方散文/现代诗歌推送"
+      },
+      "cron": {
+        "epub": "0 0 * * 6",
+        "csv": "0 0 1 1 *"
+      },
+      "enabled": true,
+      "epub": {
+        "reading_speed": 300,
+        "daily_budget_min": 30,
+        "priority": 5
+      }
+    },
+    "art-promenade": {
+      "feed": {
+        "title": "副刊：艺术长廊",
+        "description": "艺术长廊推送"
+      },
+      "cron": {
+        "epub": "0 0 1 1 *",
+        "csv": "0 0 * * 6"
+      },
+      "enabled": true,
+      "epub": {
+        "reading_speed": 300,
+        "daily_budget_min": 30,
+        "priority": 5
+      }
+    },
+    "the-base": {
+      "feed": {
+        "title": "副刊：漫画天地",
+        "description": "漫画与网络小说章节推送"
+      },
+      "cron": {
+        "epub": "0 0 1 1 *",
+        "csv": "0 0 * * 6"
+      },
+      "enabled": true,
+      "epub": {
+        "reading_speed": 300,
+        "daily_budget_min": 30,
+        "priority": 5
+      }
+    },
+    "time-collection": {
+      "feed": {
+        "title": "豆豆🐖小剧场",
+        "description": "电视剧、番剧资源转RSS"
+      },
+      "cron": {
+        "epub": "0 0 1 1 *",
+        "csv": "0 0 * * *"
+      },
+      "enabled": true,
+      "epub": {
+        "reading_speed": 300,
+        "daily_budget_min": 30,
+        "priority": 5
+      }
+    }
+  }
+}
