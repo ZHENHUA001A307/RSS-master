@@ -2,6 +2,9 @@ __pycache__/
 *.pyc
 *.log
 webui/*.bak*
+webui/*.broken
+webui/patch_*.py
+webui/fix_*.py
 webui/test_*.py
 temp_*
 .DS_Store
