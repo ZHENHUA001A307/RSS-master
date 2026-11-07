@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+*.log
+webui/*.bak*
+webui/test_*.py
+temp_*
+.DS_Store
+Thumbs.db
