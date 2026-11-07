@@ -23,13 +23,14 @@ def read_json(path, default=None):
 
 def write_json(path, obj):
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding=_utf8)
+    with _lock:
+        path.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding=_utf8)
 
 def write_text(path, text):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding=_utf8)
 
-def run_ps(cmd, cwd=None, timeout=300):
+def run_ps(cmd, timeout=300):
     import tempfile, os
     temp_path = None
     try:
@@ -242,7 +243,10 @@ def update_task_config(name, task_id, fields):
 
     write_json(REPOS_JSON, cfg)
     
-    yml_path = p / '.github' / 'workflows' / target.get('workflow', '')
+    _wf = target.get('workflow', '')
+    if not _wf:
+        return False, f'task {task_id} workflow field is empty', []
+    yml_path = p / '.github' / 'workflows' / _wf
     if not yml_path.exists(): return False, 'workflow 文件不存在', []
 
     ytext = yml_path.read_text(encoding='utf-8')
@@ -276,6 +280,7 @@ def create_csv_task(name, fields):
     tpl = tpl.replace("__ID__", task_id).replace("__CRON__", fields.get("cron", "")).replace("__LANG__", fields.get("lang", ""))
     tpl = tpl.replace("__INPUT_FILE__", fields.get("input_file", "")).replace("__PROGRESS_FILE__", fields.get("progress_file", ""))
 
+    (p / ".github" / "workflows").mkdir(parents=True, exist_ok=True)
     yml_path = p / ".github" / "workflows" / ("task-" + task_id + ".yml")
     if yml_path.exists(): return False, "workflow 文件已存在", []
     yml_path.write_text(tpl, encoding="utf-8")
@@ -334,15 +339,15 @@ def apply_gear(gear):
                     if val: repo_cfg["cron"][mode] = val
         else:
             # 处理任务仓库
+            repo_gear = gear_map.get(name)
             for task in repo_cfg["tasks"]:
                 tid = task.get("id")
                 old_cron = task.get("cron", "")
                 if old_cron == "0 0 1 1 *": continue
                 if gear == "0":
                     task["cron"] = "0 0 1 2 *"
-                else:
-                    val = gear_map.get(name, {}).get(tid) if isinstance(gear_map.get(name), dict) else old_cron
-                    if val: task["cron"] = val
+                elif isinstance(repo_gear, dict) and tid in repo_gear:
+                    task["cron"] = repo_gear[tid]
 
     cfg["current_gear"] = gear
     write_json(REPOS_JSON, cfg)
@@ -440,6 +445,12 @@ def health_check(name, net_ms=None):
     except: pass
 
     try:
+        _feed = p / "feed.xml"
+        res["feed"]["ok"] = _feed.exists()
+        res["feed"]["msg"] = "exists" if _feed.exists() else "missing"
+    except: pass
+
+    try:
         cfg = read_json(REPOS_JSON, {})
         repo_cfg = cfg.get("repos", {}).get(name, {})
         is_diff = False
@@ -459,7 +470,13 @@ def health_check(name, net_ms=None):
         res["progress"]["msg"] = "不一致" if is_diff else "一致"
     except: pass
 
-    res["level"] = "red" if any(not res[k]["ok"] for k in ["actions", "git", "progress"] if res[k]["ok"] is not None) else "green"
+    _checks = [res["actions"]["ok"], res["git"]["ok"], res["progress"]["ok"]]
+    if any(ok is False for ok in _checks):
+        res["level"] = "red"
+    elif any(ok is None for ok in _checks):
+        res["level"] = "yellow"
+    else:
+        res["level"] = "green"
     return res
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -485,8 +502,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         parts = self._parts()
         if not parts:
             self._send(200, (Path(__file__).parent / "index.html").read_text(encoding="utf-8"), "text/html; charset=utf-8"); return
-        if parts == ["api", "config"]: self._json(read_json(REPOS_JSON)); return
-        if parts == ["api", "status"]: self._json({name: git_status(name) for name in read_json(REPOS_JSON).get("repos", {})}); return
+        if parts == ["api", "config"]:
+            self._json(read_json(REPOS_JSON, {"owner": "", "current_gear": "0", "defaults": {}, "gears": {}, "repos": {}})); return
+        if parts == ["api", "status"]:
+            _c = read_json(REPOS_JSON, {"repos": {}})
+            self._json({name: git_status(name) for name in _c.get("repos", {})}); return
         if len(parts) == 3 and parts[1] == "repo-info": self._json(repo_info(parts[2])); return
         if len(parts) == 3 and parts[1] == "books": self._json(list_books(parts[2])); return
         if len(parts) == 4 and parts[1] == "preview": 
@@ -511,7 +531,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 ok, msg = apply_gear(json.loads(body).get("gear")); self._json({"ok": ok, "output": msg}); return
             if parts == ["api", "push"]:
                 try:
-                    c, o, e = run_ps(self._push_script(), 600)
+                    script = self._push_script().replace("__ROOT__", str(ROOT))
+                    c, o, e = run_ps(script, timeout=600)
                     self._json({"ok": c == 0, "output": o + "\n" + e})
                 except Exception as ex:
                     self._json({"ok": False, "error": f"Push 异常: {str(ex)}"}, 500)
@@ -548,8 +569,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def _push_script(self):
         return r'''
-$root = "E:\2_Assets\E2_1 RSS"
-Get-ChildItem -Path "$root" -Directory | Where-Object { Test-Path "$($_.FullName)\.git" } | ForEach-Object {
+$root = "__ROOT__"
+Get-ChildItem -Path "$root" -Directory | Where-Object { (Test-Path "$($_.FullName)\.git") -and ($_.Name -ne "RSS-master-main") } | ForEach-Object {
     $p = $_.FullName
     Write-Host "== $($_.Name) =="
     if ((Test-Path "$p\.git\rebase-merge") -or (Test-Path "$p\.git\rebase-apply")) { git -C $p rebase --abort 2>$null }
