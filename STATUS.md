@@ -12,11 +12,11 @@
 | Purpose | Path |
 |---|---|
 | Workspace root | E:\2_Assets\E2_1 RSS |
-| Web UI | RSS-master-main\webui |
-| Config | RSS-master-main\repos.json |
-| Sync script | RSS-master-main\sync.ps1 |
-| Tests | RSS-master-main\webui\test_all.py |
-| Archive | RSS-master-main\_archive |
+| Web UI | _epub_csv_master\webui |
+| Config | _epub_csv_master\repos.json |
+| Sync script | _epub_csv_master\sync.ps1 |
+| Tests | _epub_csv_master\webui\test_all.py |
+| Archive | _epub_csv_master\_archive |
 
 ## Done
 - 2026-11-07 Fixed server.py P0/P1 (11 places): push timeout, hardcoded root, mkdir, empty workflow, gear task branch, write_json lock, GET safe default, health feed, health yellow
@@ -38,7 +38,7 @@
 ## Commands
 - Start:    python webui\server.py
 - Test:     python webui\test_all.py
-- Rollback: git -C "E:\2_Assets\E2_1 RSS\RSS-master-main" reset --hard a80c8bf
+- Rollback: git -C "E:\2_Assets\E2_1 RSS\_epub_csv_master" reset --hard a80c8bf
 
 ## Notes
 - .gitignore ignores webui/*.bak*, webui/*.broken, webui/test_*.py

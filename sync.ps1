@@ -3,10 +3,10 @@ param([switch]$Apply)
 $root = "E:\2_Assets\E2_1 RSS"
 $masterFile = Join-Path $root "_master\repos.json"
 if (-not (Test-Path $masterFile)) {
-    $masterFile = Join-Path $root "RSS-master-main\repos.json"
+    $masterFile = Join-Path $root "_epub_csv_master\repos.json"
 }
 if (-not (Test-Path $masterFile)) {
-    $masterFile = "E:\2_Assets\E2_1 RSS\RSS-master-main\repos.json"
+    $masterFile = "E:\2_Assets\E2_1 RSS\_epub_csv_master\repos.json"
 }
 
 $master = Get-Content $masterFile -Raw -Encoding UTF8 | ConvertFrom-Json

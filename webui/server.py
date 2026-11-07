@@ -570,7 +570,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def _push_script(self):
         return r'''
 $root = "__ROOT__"
-Get-ChildItem -Path "$root" -Directory | Where-Object { (Test-Path "$($_.FullName)\.git") -and ($_.Name -ne "RSS-master-main") } | ForEach-Object {
+Get-ChildItem -Path "$root" -Directory | Where-Object { (Test-Path "$($_.FullName)\.git") -and -not (Test-Path "$($_.FullName)\webui\server.py") } | ForEach-Object {
     $p = $_.FullName
     Write-Host "== $($_.Name) =="
     if ((Test-Path "$p\.git\rebase-merge") -or (Test-Path "$p\.git\rebase-apply")) { git -C $p rebase --abort 2>$null }
