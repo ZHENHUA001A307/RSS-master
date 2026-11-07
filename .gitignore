@@ -9,3 +9,4 @@ webui/test_*.py
 temp_*
 .DS_Store
 Thumbs.db
+!webui/test_all.py
